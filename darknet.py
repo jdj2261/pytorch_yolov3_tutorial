@@ -6,8 +6,7 @@ import torch.nn.functional as F
 from torch.autograd import Variable     # autograd : 자동미분기능 
 import numpy as np
 from collections import OrderedDict
-
-from torch.nn.modules import module
+from util import *
 
 def parse_cfg(cfgfile: str) -> list:
     """
@@ -120,7 +119,6 @@ def create_modules(blocks: list) -> str:
             upsample = nn.Upsample(scale_factor=2, mode="bilinear") # 2배로 보간하여 업샘플링 적용
             module.add_module("upsample_{}".format(index), upsample)
         
-
         elif (x["type"] == "route"):
             '''
             Route와 Shortcut Layer 
@@ -209,11 +207,122 @@ class Darknet(nn.Module):
                     map2 = outputs[i + layers[1]]
                     x = torch.cat((map1, map2), 1)  # 두개의 feature map을 이어붙일 때 사용
 
-            elif module_type = "shortcut":
+            elif module_type == "shortcut":
                 from_ = int(module["from"])
                 x = outputs[i-1] + outputs[i+from_] # 이전레이어와 합쳐주면 됨
 
-            
+            elif module_type == 'yolo':
+                """
+                yolo의 output : 
+                feature map의 depth(dimension), bounding box 속성을 포함한 convolutional feature map
+                (5,6) cell의 2번째 bounding box를 참조하고 싶다면
+                map[5, 6, (5+C):2*(5*C)]의 인덱스를 참조해야 한다.
+                이 형태는 output을 처리할 때 매우 불편하며, 
+                feature map들의 크기가 다르더라도 처리는 동일하게 이뤄져야 한다.
+                모두 같은 tensor에 들어가기 위해 predict_transform 함수를 만들자.
+                """
+                anchors = self.module_list[i][0].anchors
+                #Get the input dimensions
+                inp_dim = int(self.net_info["height"])
+                # Get the number of classes
+                num_classes = int(module["classes"])
 
-# blocks = parse_cfg('cfg/yolov3.cfg')
-# print(create_modules(blocks))
+                # Transform
+                x = x.data
+                x = predict_transform(x, inp_dim, anchors, num_classes, CUDA)
+
+                # write가 0이면 collector가 아직 초기화 되지 않음
+                # tensor를 초기화해야 concatenate를 할 수 있다
+                if not write:
+                    detections = x
+                    write = 1
+                # write가 1이면 detection map을 concentenate
+                else:
+                    detections = torch.cat((detections, x), 1)
+
+            outputs[i] = x
+        return detections
+
+    def load_weights(self, weightfile: str) -> None:
+        fp = open(weightfile, "rb")
+
+        # 5개의 int32값 저장
+        # The first 5 values are header information 
+        # 1. Major version number
+        # 2. Minor Version Number
+        # 3. Subversion number 
+        # 4,5. Images seen by the network (during training)
+        header = np.fromfile(fp, dtype = np.int32, count =5)
+        self.header = torch.from_numpy(header)
+        self.seen = self.header[3]  #number of images seen during training
+
+        # 그 외에 나머지 bits들은 weight를 나타냄
+        # float32 혹은 32-bit floats로 저장
+        weights = np.fromfile(fp, dtype=np.float32)
+
+        # weights 파일을 iterate하면서 weights를 네트워크 module에 load
+        ptr = 0
+        for i in range(len(self.module_list)):
+            module_type = self.blocks[i + 1]["type"]
+
+            # convolutional 블록이 batch_normalize를 가지고 있는지 확인
+            if module_type == "convolutional":
+                model = self.module_list[i]
+                try:
+                    batch_normalize = int(self.blocks[i + 1]["batch_normalize"])
+                except:
+                    batch_normalize = 0
+                conv = model[0]
+
+                # ptr이라는 벼누로 weights array의 어느 위치에 있는지 추적
+                if batch_normalize:
+                    bn = model[1]
+                    # Batch Norm Layer 수
+                    num_bn_biases = bn.bias.numel()
+
+                    #Load the weights
+                    bn_biases = torch.from_numpy(weights[ptr:ptr + num_bn_biases])               
+                    ptr += num_bn_biases
+
+                    bn_weights = torch.from_numpy(weights[ptr: ptr + num_bn_biases])
+                    ptr  += num_bn_biases
+        
+                    bn_running_mean = torch.from_numpy(weights[ptr: ptr + num_bn_biases])
+                    ptr  += num_bn_biases
+        
+                    bn_running_var = torch.from_numpy(weights[ptr: ptr + num_bn_biases])
+                    ptr  += num_bn_biases
+
+                    #Cast the loaded weights into dims of model weights. 
+                    bn_biases = bn_biases.view_as(bn.bias.data)
+                    bn_weights = bn_weights.view_as(bn.weight.data)
+                    bn_running_mean = bn_running_mean.view_as(bn.running_mean)
+                    bn_running_var = bn_running_var.view_as(bn.running_var)
+
+                    #Copy the data to model
+                    bn.bias.data.copy_(bn_biases)
+                    bn.weight.data.copy_(bn_weights)
+                    bn.running_mean.copy_(bn_running_mean)
+                    bn.running_var.copy_(bn_running_var)
+                else:
+                    num_biases = conv.bias.numel()
+
+                    #Load the weights
+                    conv_biases = torch.from_numpy(weights[ptr: ptr + num_biases])
+                    ptr = ptr + num_biases
+                
+                    #reshape the loaded weights according to the dims of the model weights
+                    conv_biases = conv_biases.view_as(conv.bias.data)
+                
+                    #Finally copy the data
+                    conv.bias.data.copy_(conv_biases)         
+                #Let us load the weights for the Convolutional layers
+                num_weights = conv.weight.numel()
+                
+                #Do the same as above for weights
+                conv_weights = torch.from_numpy(weights[ptr:ptr+num_weights])
+                ptr = ptr + num_weights
+                
+                conv_weights = conv_weights.view_as(conv.weight.data)
+                conv.weight.data.copy_(conv_weights)
+
