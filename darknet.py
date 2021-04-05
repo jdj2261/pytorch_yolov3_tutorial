@@ -8,6 +8,15 @@ import numpy as np
 from collections import OrderedDict
 from util import *
 
+def get_test_input():
+    img = cv2.imread("dog-cycle-car.png")
+    img = cv2.resize(img, (416,416))          #Resize to the input dimension
+    img_ =  img[:,:,::-1].transpose((2,0,1))  # BGR -> RGB | H X W C -> C X H X W 
+    img_ = img_[np.newaxis,:,:,:]/255.0       #Add a channel at 0 (for batch) | Normalise
+    img_ = torch.from_numpy(img_).float()     #Convert to float
+    img_ = Variable(img_)                     # Convert to Variable
+    return img_
+    
 def parse_cfg(cfgfile: str) -> list:
     """
     cfg 파일을 파싱해서 모든 block을 dict 형식으로 저장
@@ -111,13 +120,13 @@ def create_modules(blocks: list) -> str:
             if activation == "leaky":
                 # inplace = True : input 자체를 수정(메모리 usage는 좋아지나 input을 없앰)
                 activn = nn.LeakyReLU(0.1, inplace=True) 
-                module.add_module("leaky_{}".format(index), activn)
+                module.add_module("leaky_{0}".format(index), activn)
         
         # upsampling layer이면 Bilinear2dUpsampling 사용
         elif (x["type"] == "upsample"):
             stride = int(x["stride"])
-            upsample = nn.Upsample(scale_factor=2, mode="bilinear") # 2배로 보간하여 업샘플링 적용
-            module.add_module("upsample_{}".format(index), upsample)
+            upsample = nn.Upsample(scale_factor=2, mode="nearest") # 2배로 보간하여 업샘플링 적용
+            module.add_module("upsample_{0}".format(index), upsample)
         
         elif (x["type"] == "route"):
             '''
@@ -148,6 +157,12 @@ def create_modules(blocks: list) -> str:
                 filters = output_filters[index + start] + output_filters[index + end]
             else:
                 filters = output_filters[index + start]
+
+        #shortcut corresponds to skip connection
+        elif x["type"] == "shortcut":
+            shortcut = EmptyLayer()
+            module.add_module("shortcut_{}".format(index), shortcut)
+            
         elif (x["type"] == "yolo"):
             mask = x["mask"].split(",")
             mask = [int(x) for x in mask]
@@ -274,7 +289,7 @@ class Darknet(nn.Module):
                     batch_normalize = 0
                 conv = model[0]
 
-                # ptr이라는 벼누로 weights array의 어느 위치에 있는지 추적
+                # ptr이라는 변수로 weights array의 어느 위치에 있는지 추적
                 if batch_normalize:
                     bn = model[1]
                     # Batch Norm Layer 수

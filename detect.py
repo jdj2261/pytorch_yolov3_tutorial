@@ -123,8 +123,8 @@ for i, batch in enumerate(im_batches):
     start = time.time()
     if CUDA:
         batch = batch.cuda()
-
-    prediction = model(Variable(batch, volatile = True), CUDA)
+    with torch.no_grad():
+        prediction = model(Variable(batch), CUDA)
 
     prediction = write_results(prediction, confidence, num_classes, nms_conf = nms_thesh)
 
@@ -163,3 +163,65 @@ try:
 except NameError:
     print ("No detections were made")
     exit()
+
+# 원본 이미지 좌표로 변환
+im_dim_list = torch.index_select(im_dim_list, 0, output[:,0].long())
+
+scaling_factor = torch.min(416/im_dim_list,1)[0].view(-1,1)
+
+output[:,[1,3]] -= (inp_dim - scaling_factor*im_dim_list[:,0].view(-1,1))/2
+output[:,[2,4]] -= (inp_dim - scaling_factor*im_dim_list[:,1].view(-1,1))/2
+
+
+output[:,1:5] /= scaling_factor # rescaling 취소
+
+# 이미지 바깥에 boundary를 가지는 bounding box를 잘라 이미지 내에 edge들이 있게 함
+for i in range(output.shape[0]):
+    output[i, [1,3]] = torch.clamp(output[i, [1,3]], 0.0, im_dim_list[i,0])
+    output[i, [2,4]] = torch.clamp(output[i, [2,4]], 0.0, im_dim_list[i,1])
+
+# box들을 랜덤한 색으로 칠함
+output_recast = time.time()
+class_load = time.time()
+colors = pkl.load(open("pallete", "rb"))
+
+draw = time.time()
+
+# Box를 그림
+def write(x, results):
+    c1 = tuple(x[1:3].int())
+    c2 = tuple(x[3:5].int())
+    img = results[int(x[0])]
+    cls = int(x[-1])
+    color = random.choice(colors)
+    label = "{0}".format(classes[cls])
+    cv2.rectangle(img, c1, c2,color, 1)
+    t_size = cv2.getTextSize(label, cv2.FONT_HERSHEY_PLAIN, 1 , 1)[0]
+    c2 = c1[0] + t_size[0] + 3, c1[1] + t_size[1] + 4
+    cv2.rectangle(img, c1, c2,color, -1)    # box를 색상으로 fill
+    cv2.putText(img, label, (c1[0], c1[1] + t_size[1] + 4), cv2.FONT_HERSHEY_PLAIN, 1, [225,255,255], 1);
+    return img
+
+# loaded_ims에 있는 이미지를 write 함수에 보내고 리턴 받은 값을 리스트로 저장
+list(map(lambda x: write(x, loaded_ims), output))
+
+# det_이미지이름 형태로 저장
+det_names = pd.Series(imlist).apply(lambda x: "{}/det_{}".format(args.det,x.split("/")[-1]))
+
+list(map(cv2.imwrite, det_names, loaded_ims))
+end = time.time()
+
+print("SUMMARY")
+print("----------------------------------------------------------")
+print("{:25s}: {}".format("Task", "Time Taken (in seconds)"))
+print()
+print("{:25s}: {:2.3f}".format("Reading addresses", load_batch - read_dir))
+print("{:25s}: {:2.3f}".format("Loading batch", start_det_loop - load_batch))
+print("{:25s}: {:2.3f}".format("Detection (" + str(len(imlist)) +  " images)", output_recast - start_det_loop))
+print("{:25s}: {:2.3f}".format("Output Processing", class_load - output_recast))
+print("{:25s}: {:2.3f}".format("Drawing Boxes", end - draw))
+print("{:25s}: {:2.3f}".format("Average time_per_img", (end - load_batch)/len(imlist)))
+print("----------------------------------------------------------")
+
+
+torch.cuda.empty_cache()

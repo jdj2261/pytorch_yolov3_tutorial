@@ -56,8 +56,8 @@ def predict_transform(prediction, inp_dim, anchors, num_classes, CUDA=True):
     bbox_attrs = 5 + num_classes
     num_anchors = len(anchors)
 
-    prediction = prediction.view(batch_size, bbox_attrs * num_anchors, grid_size*grid_size)
-    prediction = prediction.transpose(1,2).contiguos()
+    prediction = prediction.view(batch_size, bbox_attrs*num_anchors, grid_size*grid_size)
+    prediction = prediction.transpose(1,2).contiguous()
     prediction = prediction.view(batch_size, grid_size*grid_size*num_anchors, bbox_attrs)
     anchors = [(a[0]/stride, a[1]/stride) for a in anchors]
 
@@ -220,7 +220,7 @@ def prep_image(img, inp_dim):
     변수를 반환합니다. 
     """
 
-    img = cv2.resize(img, (inp_dim, inp_dim))
+    img = (letterbox_image(img, (inp_dim, inp_dim)))
     img = img[:,:,::-1].transpose((2,0,1)).copy()
     img = torch.from_numpy(img).float().div(255.0).unsqueeze(0)
     return img
